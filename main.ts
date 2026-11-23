@@ -10,9 +10,11 @@
 //     2% below the highest close seen since entry (trailing stop), or the
 //     120-minute return collapses below -1.5% (momentum breakdown).
 //   * Otherwise hold. No re-entry filter beyond the entry rule itself, so a
-//     fresh rally after a stop-out can be caught again, but every round trip
-//     pays ~40 bps in fees, slippage and pool impact, so entries are rare
-//     by construction: on the dev window this fires exactly once.
+//     fresh rally after a stop-out can be caught again — but the entry bar
+//     rises 25 bps per earlier stop-out, so a choppy market cannot bleed
+//     the bot through repeated round trips that each pay ~40 bps in fees,
+//     slippage and pool impact. Entries are rare by construction: on the
+//     dev window this fires exactly once.
 //
 // All arithmetic is bigint (raw price units and basis points), so two
 // executions on the same bars produce byte-identical action logs. No wall
@@ -40,6 +42,11 @@ const MAX_SLIPPAGE_BPS = 250;
 const closes: bigint[] = [];
 let ema120: bigint | null = null;
 let peak: bigint | null = null;
+// Stop-outs so far this run. Each one raises the bar for the next entry:
+// after being stopped out once, a fresh rally must clear 75 bps over 120
+// minutes instead of 50, so a choppy market cannot bleed the bot through
+// repeated round trips that each pay ~40 bps in fees, slippage and impact.
+let exits = 0;
 
 function retBps(barsBack: number): bigint | null {
   const n = closes.length;
@@ -67,6 +74,7 @@ function onBatch(state: BarsState, _batch: Batch): OrderInput[] {
     const collapsed = ret120 !== null && ret120 < COLLAPSE_BPS;
     if (stopped || collapsed) {
       peak = null;
+      exits += 1;
       return [{ side: "sell", symbol: SYMBOL, qty: holding.qty, max_slippage_bps: MAX_SLIPPAGE_BPS }];
     }
     return [];
@@ -75,8 +83,10 @@ function onBatch(state: BarsState, _batch: Batch): OrderInput[] {
   peak = null;
   const ret120 = retBps(120);
   const ret15 = retBps(15);
+  // Entry bar rises 25 bps per earlier stop-out (see `exits` above).
+  const entryBar = ENTRY_RET_BPS + 25n * BigInt(exits);
   if (
-    ret120 !== null && ret120 > ENTRY_RET_BPS &&
+    ret120 !== null && ret120 > entryBar &&
     ret15 !== null && ret15 > 0n &&
     ema120 !== null && close > ema120 &&
     state.cash > 0n
